@@ -236,16 +236,16 @@ module cpu_axi_interface (
                     end
                     default: begin
                         // Instruction memory write - FIXED address calculation
-                        if (bus_addr[7:2] >= ADDR_INSTR_BASE && 
-                            bus_addr[7:2] < ADDR_DATA_BASE) begin
+                        if (bus_addr[15:2] >= {8'h00, ADDR_INSTR_BASE} && 
+                            bus_addr[15:2] < {8'h00, ADDR_DATA_BASE}) begin
                             axi_instr_we_hold <= 1'b1;
-                            axi_instr_addr <= (bus_addr[7:2] - ADDR_INSTR_BASE);
+                            axi_instr_addr <= bus_addr[15:2] - {8'h00, ADDR_INSTR_BASE};
                             axi_instr_wdata <= bus_wdata;
                         end
-                        // Data memory write - NEW
-                        else if (bus_addr[7:2] >= ADDR_DATA_BASE) begin
+                        // Data memory write - FIXED address calculation
+                        else if (bus_addr[15:2] >= {8'h00, ADDR_DATA_BASE}) begin
                             axi_data_we_hold <= 1'b1;
-                            axi_data_addr <= (bus_addr[7:2] - ADDR_DATA_BASE);
+                            axi_data_addr <= bus_addr[15:2] - {8'h00, ADDR_DATA_BASE};
                             axi_data_wdata <= bus_wdata;
                             axi_data_wstrb <= w_strb;
                         end
