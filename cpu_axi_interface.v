@@ -1,4 +1,4 @@
-// cpu_axi_interface.v
+// cpu_axi_interface.v - FIXED VERSION
 // AXI-Lite interface handler for RISC-V CPU
 // Handles memory-mapped control, status, and memory access
 
@@ -44,6 +44,10 @@ module cpu_axi_interface (
     input  wire [31:0] instr_rdata,
     
     // Data memory interface
+    output reg         axi_data_we,        // NEW: Write enable for data memory
+    output reg  [11:0] axi_data_addr,      // NEW: Address for data memory
+    output reg  [31:0] axi_data_wdata,     // NEW: Write data for data memory
+    output reg  [3:0]  axi_data_wstrb,     // NEW: Write strobe for data memory
     input  wire [31:0] data_rdata,
     
     // Register file interface
@@ -80,6 +84,11 @@ module cpu_axi_interface (
     reg [31:0] S_AXI_RDATA_reg;
     reg [1:0]  S_AXI_RRESP_reg;
     reg        S_AXI_RVALID_reg;
+    
+    // Delayed write signals to hold for one extra cycle
+    reg        axi_pc_we_hold;
+    reg        axi_instr_we_hold;
+    reg        axi_data_we_hold;
     
     //==========================================================================
     // AXI Write Address Channel
@@ -191,34 +200,54 @@ module cpu_axi_interface (
     assign bus_wdata = w_data;
     
     //==========================================================================
-    // Register Write Logic
+    // Register Write Logic - FIXED
     //==========================================================================
     always @(posedge S_AXI_ACLK) begin
         if (!S_AXI_ARESETN) begin
             cpu_ctrl <= 32'h0;
             axi_pc_write <= 32'h0;
             axi_pc_we <= 1'b0;
+            axi_pc_we_hold <= 1'b0;
             axi_instr_we <= 1'b0;
+            axi_instr_we_hold <= 1'b0;
             axi_instr_addr <= 12'h0;
             axi_instr_wdata <= 32'h0;
+            axi_data_we <= 1'b0;
+            axi_data_we_hold <= 1'b0;
+            axi_data_addr <= 12'h0;
+            axi_data_wdata <= 32'h0;
+            axi_data_wstrb <= 4'h0;
         end else begin
-            axi_pc_we <= 1'b0;
-            axi_instr_we <= 1'b0;
+            // Hold write enables for one extra cycle for BRAM latency
+            axi_pc_we <= axi_pc_we_hold;
+            axi_instr_we <= axi_instr_we_hold;
+            axi_data_we <= axi_data_we_hold;
+            
+            axi_pc_we_hold <= 1'b0;
+            axi_instr_we_hold <= 1'b0;
+            axi_data_we_hold <= 1'b0;
             
             if (bus_we) begin
                 case (bus_addr[7:2])
                     ADDR_CPU_CTRL: cpu_ctrl <= bus_wdata;
                     ADDR_CPU_PC: begin
                         axi_pc_write <= bus_wdata;
-                        axi_pc_we <= 1'b1;
+                        axi_pc_we_hold <= 1'b1;
                     end
                     default: begin
-                        // Instruction memory write
+                        // Instruction memory write - FIXED address calculation
                         if (bus_addr[7:2] >= ADDR_INSTR_BASE && 
-                            bus_addr[7:2] < ADDR_INSTR_BASE + 16) begin
-                            axi_instr_we <= 1'b1;
+                            bus_addr[7:2] < ADDR_DATA_BASE) begin
+                            axi_instr_we_hold <= 1'b1;
                             axi_instr_addr <= (bus_addr[7:2] - ADDR_INSTR_BASE);
                             axi_instr_wdata <= bus_wdata;
+                        end
+                        // Data memory write - NEW
+                        else if (bus_addr[7:2] >= ADDR_DATA_BASE) begin
+                            axi_data_we_hold <= 1'b1;
+                            axi_data_addr <= (bus_addr[7:2] - ADDR_DATA_BASE);
+                            axi_data_wdata <= bus_wdata;
+                            axi_data_wstrb <= w_strb;
                         end
                     end
                 endcase
@@ -239,7 +268,7 @@ module cpu_axi_interface (
             ADDR_CPU_REG:    bus_rdata_reg = reg_rdata;
             default: begin
                 if (bus_addr[7:2] >= ADDR_INSTR_BASE && 
-                    bus_addr[7:2] < ADDR_INSTR_BASE + 16) begin
+                    bus_addr[7:2] < ADDR_DATA_BASE) begin
                     bus_rdata_reg = instr_rdata;
                 end else if (bus_addr[7:2] >= ADDR_DATA_BASE) begin
                     bus_rdata_reg = data_rdata;
