@@ -1,4 +1,4 @@
-// cpu_axi_interface.v - FIXED VERSION
+// cpu_axi_interface.v - FIXED VERSION with stable address latching
 // AXI-Lite interface handler for RISC-V CPU
 // Handles memory-mapped control, status, and memory access
 
@@ -85,10 +85,10 @@ module cpu_axi_interface (
     reg [1:0]  S_AXI_RRESP_reg;
     reg        S_AXI_RVALID_reg;
     
-    // Delayed write signals to hold for one extra cycle
-    reg        axi_pc_we_hold;
-    reg        axi_instr_we_hold;
-    reg        axi_data_we_hold;
+    // CRITICAL FIX: Latch bus_addr for stable addressing
+    reg [31:0] latched_bus_addr;
+    reg [31:0] latched_bus_wdata;
+    reg [3:0]  latched_w_strb;
     
     //==========================================================================
     // AXI Write Address Channel
@@ -200,54 +200,62 @@ module cpu_axi_interface (
     assign bus_wdata = w_data;
     
     //==========================================================================
-    // Register Write Logic - FIXED ADDRESS CALCULATIONS
+    // CRITICAL FIX: Latch address and data when write_ready
+    //==========================================================================
+    always @(posedge S_AXI_ACLK) begin
+        if (!S_AXI_ARESETN) begin
+            latched_bus_addr <= 32'd0;
+            latched_bus_wdata <= 32'd0;
+            latched_w_strb <= 4'b0000;
+        end else if (write_ready) begin
+            latched_bus_addr <= bus_addr;
+            latched_bus_wdata <= bus_wdata;
+            latched_w_strb <= w_strb;
+        end
+    end
+    
+    //==========================================================================
+    // Register Write Logic - FIXED with stable latched addresses
     //==========================================================================
     always @(posedge S_AXI_ACLK) begin
         if (!S_AXI_ARESETN) begin
             cpu_ctrl <= 32'h0;
             axi_pc_write <= 32'h0;
             axi_pc_we <= 1'b0;
-            axi_pc_we_hold <= 1'b0;
             axi_instr_we <= 1'b0;
-            axi_instr_we_hold <= 1'b0;
             axi_instr_addr <= 12'h0;
             axi_instr_wdata <= 32'h0;
             axi_data_we <= 1'b0;
-            axi_data_we_hold <= 1'b0;
             axi_data_addr <= 12'h0;
             axi_data_wdata <= 32'h0;
             axi_data_wstrb <= 4'h0;
         end else begin
-            // Hold write enables for one extra cycle for BRAM latency
-            axi_pc_we <= axi_pc_we_hold;
-            axi_instr_we <= axi_instr_we_hold;
-            axi_data_we <= axi_data_we_hold;
-            
-            axi_pc_we_hold <= 1'b0;
-            axi_instr_we_hold <= 1'b0;
-            axi_data_we_hold <= 1'b0;
+            // Default: clear write enables
+            axi_pc_we <= 1'b0;
+            axi_instr_we <= 1'b0;
+            axi_data_we <= 1'b0;
             
             if (bus_we) begin
                 case (bus_addr[7:2])
                     ADDR_CPU_CTRL: cpu_ctrl <= bus_wdata;
                     ADDR_CPU_PC: begin
                         axi_pc_write <= bus_wdata;
-                        axi_pc_we_hold <= 1'b1;
+                        axi_pc_we <= 1'b1;
                     end
                     default: begin
-                        // Instruction memory write - FIXED: consistent use of [7:2]
-                        if (bus_addr[7:2] >= ADDR_INSTR_BASE && 
-                            bus_addr[7:2] < ADDR_DATA_BASE) begin
-                            axi_instr_we_hold <= 1'b1;
-                            axi_instr_addr <= {6'b0, bus_addr[7:2]} - {6'b0, ADDR_INSTR_BASE};
-                            axi_instr_wdata <= bus_wdata;
+                        // Instruction memory write - use LATCHED address
+                        if (latched_bus_addr[7:2] >= ADDR_INSTR_BASE && 
+                            latched_bus_addr[7:2] < ADDR_DATA_BASE) begin
+                            axi_instr_we <= 1'b1;
+                            axi_instr_addr <= {6'b0, latched_bus_addr[7:2]} - {6'b0, ADDR_INSTR_BASE};
+                            axi_instr_wdata <= latched_bus_wdata;
                         end
-                        // Data memory write - FIXED: consistent use of [7:2]
-                        else if (bus_addr[7:2] >= ADDR_DATA_BASE) begin
-                            axi_data_we_hold <= 1'b1;
-                            axi_data_addr <= {6'b0, bus_addr[7:2]} - {6'b0, ADDR_DATA_BASE};
-                            axi_data_wdata <= bus_wdata;
-                            axi_data_wstrb <= w_strb;
+                        // Data memory write - use LATCHED address
+                        else if (latched_bus_addr[7:2] >= ADDR_DATA_BASE) begin
+                            axi_data_we <= 1'b1;
+                            axi_data_addr <= {6'b0, latched_bus_addr[7:2]} - {6'b0, ADDR_DATA_BASE};
+                            axi_data_wdata <= latched_bus_wdata;
+                            axi_data_wstrb <= latched_w_strb;
                         end
                     end
                 endcase
