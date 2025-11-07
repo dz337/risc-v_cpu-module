@@ -1,4 +1,3 @@
-  GNU nano 6.2                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 test_axi2.py
 #!/usr/bin/env python3
 """
 AXI Interface Test Script for GPU and RISC-V CPU
@@ -370,5 +369,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
