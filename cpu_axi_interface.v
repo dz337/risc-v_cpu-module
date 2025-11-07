@@ -44,10 +44,10 @@ module cpu_axi_interface (
     input  wire [31:0] instr_rdata,
     
     // Data memory interface
-    output reg         axi_data_we,        // NEW: Write enable for data memory
-    output reg  [11:0] axi_data_addr,      // NEW: Address for data memory
-    output reg  [31:0] axi_data_wdata,     // NEW: Write data for data memory
-    output reg  [3:0]  axi_data_wstrb,     // NEW: Write strobe for data memory
+    output reg         axi_data_we,
+    output reg  [11:0] axi_data_addr,
+    output reg  [31:0] axi_data_wdata,
+    output reg  [3:0]  axi_data_wstrb,
     input  wire [31:0] data_rdata,
     
     // Register file interface
@@ -200,7 +200,7 @@ module cpu_axi_interface (
     assign bus_wdata = w_data;
     
     //==========================================================================
-    // Register Write Logic - FIXED
+    // Register Write Logic - FIXED ADDRESS CALCULATIONS
     //==========================================================================
     always @(posedge S_AXI_ACLK) begin
         if (!S_AXI_ARESETN) begin
@@ -235,17 +235,17 @@ module cpu_axi_interface (
                         axi_pc_we_hold <= 1'b1;
                     end
                     default: begin
-                        // Instruction memory write - FIXED address calculation
-                        if (bus_addr[15:2] >= {8'h00, ADDR_INSTR_BASE} && 
-                            bus_addr[15:2] < {8'h00, ADDR_DATA_BASE}) begin
+                        // Instruction memory write - FIXED: consistent use of [7:2]
+                        if (bus_addr[7:2] >= ADDR_INSTR_BASE && 
+                            bus_addr[7:2] < ADDR_DATA_BASE) begin
                             axi_instr_we_hold <= 1'b1;
-                            axi_instr_addr <= bus_addr[15:2] - {8'h00, ADDR_INSTR_BASE};
+                            axi_instr_addr <= {6'b0, bus_addr[7:2]} - {6'b0, ADDR_INSTR_BASE};
                             axi_instr_wdata <= bus_wdata;
                         end
-                        // Data memory write - FIXED address calculation
-                        else if (bus_addr[15:2] >= {8'h00, ADDR_DATA_BASE}) begin
+                        // Data memory write - FIXED: consistent use of [7:2]
+                        else if (bus_addr[7:2] >= ADDR_DATA_BASE) begin
                             axi_data_we_hold <= 1'b1;
-                            axi_data_addr <= bus_addr[15:2] - {8'h00, ADDR_DATA_BASE};
+                            axi_data_addr <= {6'b0, bus_addr[7:2]} - {6'b0, ADDR_DATA_BASE};
                             axi_data_wdata <= bus_wdata;
                             axi_data_wstrb <= w_strb;
                         end
