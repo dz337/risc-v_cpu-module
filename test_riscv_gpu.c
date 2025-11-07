@@ -1,4 +1,3 @@
-  GNU nano 6.2                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               test_riscv_gpu.c
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
