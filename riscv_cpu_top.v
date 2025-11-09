@@ -1,6 +1,6 @@
 // riscv_cpu_top.v - FIXED VERSION
 // Top-level RISC-V CPU module with AXI interface
-// Integrates all CPU components
+// FIX: Added address muxing for read vs write operations
 
 module riscv_cpu_top (
     input  wire        clk,
@@ -50,12 +50,16 @@ module riscv_cpu_top (
     wire [31:0] axi_instr_wdata;
     wire [31:0] instr_rdata;
     
-    // Data memory AXI interface - NEW SIGNALS
+    // Data memory AXI interface
     wire        axi_data_we;
     wire [11:0] axi_data_addr;
     wire [31:0] axi_data_wdata;
     wire [3:0]  axi_data_wstrb;
     wire [31:0] data_rdata_axi;
+    
+    // NEW: Read address computation wires
+    wire [11:0] read_instr_addr;
+    wire [11:0] read_data_addr;
     
     // Register file access
     wire [31:0] reg_rdata;
@@ -75,6 +79,16 @@ module riscv_cpu_top (
     wire        cpu_running;
     wire        cpu_halted;
     wire [2:0]  cpu_state;
+    
+    // NEW: Final memory addresses (muxed between read and write)
+    wire [11:0] final_instr_addr;
+    wire [11:0] final_data_addr;
+    
+    // CRITICAL FIX: Mux between write addresses and read addresses
+    // When writing, use axi_instr_addr (from write state machine)
+    // When reading, use read_instr_addr (computed from read address)
+    assign final_instr_addr = axi_instr_we ? axi_instr_addr : read_instr_addr;
+    assign final_data_addr = axi_data_we ? axi_data_addr : read_data_addr;
     
     //==========================================================================
     // AXI Interface Module
@@ -119,12 +133,16 @@ module riscv_cpu_top (
         .axi_instr_wdata(axi_instr_wdata),
         .instr_rdata(instr_rdata),
         
-        // Data memory interface - NEW CONNECTIONS
+        // Data memory interface
         .axi_data_we(axi_data_we),
         .axi_data_addr(axi_data_addr),
         .axi_data_wdata(axi_data_wdata),
         .axi_data_wstrb(axi_data_wstrb),
         .data_rdata(data_rdata_axi),
+        
+        // NEW: Read address outputs (combinational from bus_addr)
+        .read_instr_addr(read_instr_addr),
+        .read_data_addr(read_data_addr),
         
         // Register file interface
         .reg_addr(bus_addr[6:2]),
@@ -174,6 +192,7 @@ module riscv_cpu_top (
     
     //==========================================================================
     // Instruction Memory - Dual Port
+    // FIXED: Now uses final_instr_addr (muxed between read and write)
     //==========================================================================
     instruction_memory imem (
         .clk(clk),
@@ -182,15 +201,16 @@ module riscv_cpu_top (
         .cpu_addr(instr_addr),
         .cpu_rdata(instruction),
         
-        // AXI interface
+        // AXI interface - FIXED: uses muxed address
         .axi_we(axi_instr_we),
-        .axi_addr(axi_instr_addr),
+        .axi_addr(final_instr_addr),  // <-- MUXED ADDRESS
         .axi_wdata(axi_instr_wdata),
         .axi_rdata(instr_rdata)
     );
     
     //==========================================================================
-    // Data Memory - MODIFIED to be True Dual Port
+    // Data Memory - True Dual Port
+    // FIXED: Now uses final_data_addr (muxed between read and write)
     //==========================================================================
     data_memory_dual_port dmem (
         .clk(clk),
@@ -202,9 +222,9 @@ module riscv_cpu_top (
         .cpu_wstrb(data_wstrb),
         .cpu_rdata(data_rdata_cpu),
         
-        // AXI port (Port B)
+        // AXI port (Port B) - FIXED: uses muxed address
         .axi_we(axi_data_we),
-        .axi_addr(axi_data_addr),
+        .axi_addr(final_data_addr),  // <-- MUXED ADDRESS
         .axi_wdata(axi_data_wdata),
         .axi_wstrb(axi_data_wstrb),
         .axi_rdata(data_rdata_axi)
@@ -263,8 +283,7 @@ module data_memory_dual_port (
     
     assign cpu_rdata = cpu_rdata_reg;
     
-    // Port B (AXI) - FIXED: No address latching!
-    // The address is already stable from cpu_axi_interface latching
+    // Port B (AXI) - independent read/write port
     reg [31:0] axi_rdata_reg;
     
     always @(posedge clk) begin
