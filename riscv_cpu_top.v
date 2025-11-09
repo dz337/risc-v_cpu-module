@@ -219,6 +219,11 @@ endmodule
 //==============================================================================
 // NEW: True Dual Port Data Memory
 //==============================================================================
+// data_memory.v - FIXED DUAL PORT VERSION
+// Data BRAM (16KB = 4096 x 32-bit words)
+// Byte-addressable with write strobes
+// True dual port: CPU port A, AXI port B
+
 module data_memory_dual_port (
     input  wire        clk,
     
@@ -237,12 +242,12 @@ module data_memory_dual_port (
     output wire [31:0] axi_rdata
 );
 
-        parameter DEPTH = 4096;
+    parameter DEPTH = 4096;
     
     // Data memory storage
     reg [31:0] memory [0:DEPTH-1];
     
-    // Port A (CPU) - registered output (unchanged)
+    // Port A (CPU) - registered output
     reg [31:0] cpu_rdata_reg;
     
     always @(posedge clk) begin
@@ -258,40 +263,21 @@ module data_memory_dual_port (
     
     assign cpu_rdata = cpu_rdata_reg;
     
-    // -----------------------------------------------------------------
-    // Port B (AXI) - latched-address/wstrb version (replacement)
-    // -----------------------------------------------------------------
-    // This latches axi_addr and axi_wstrb on every clock so that when
-    // axi_we/axi_wdata arrive the write uses the address that was stable
-    // at the clock edge. This prevents the "rotating" / previous-cycle
-    // address effect seen with back-to-back writes.
-    //
-    // Replace the old AXI Port B always block + axi_rdata assignment with
-    // the following block.
-    // -----------------------------------------------------------------
-    
-    // Registered readback and latched address/strobe
+    // Port B (AXI) - FIXED: No address latching!
+    // The address is already stable from cpu_axi_interface latching
     reg [31:0] axi_rdata_reg;
-    reg [11:0] axi_addr_reg;
-    reg [3:0]  axi_wstrb_reg;
     
     always @(posedge clk) begin
-        // latch AXI-side address and strobes each cycle
-        axi_addr_reg <= axi_addr;
-        axi_wstrb_reg <= axi_wstrb;
-        
-        // AXI writes use the latched address/wstrb so write uses the
-        // address present at the previous clock edge (stable)
+        // AXI write uses current address when write enable is high
         if (axi_we) begin
-            if (axi_wstrb_reg[0]) memory[axi_addr_reg][7:0]   <= axi_wdata[7:0];
-            if (axi_wstrb_reg[1]) memory[axi_addr_reg][15:8]  <= axi_wdata[15:8];
-            if (axi_wstrb_reg[2]) memory[axi_addr_reg][23:16] <= axi_wdata[23:16];
-            if (axi_wstrb_reg[3]) memory[axi_addr_reg][31:24] <= axi_wdata[31:24];
+            if (axi_wstrb[0]) memory[axi_addr][7:0]   <= axi_wdata[7:0];
+            if (axi_wstrb[1]) memory[axi_addr][15:8]  <= axi_wdata[15:8];
+            if (axi_wstrb[2]) memory[axi_addr][23:16] <= axi_wdata[23:16];
+            if (axi_wstrb[3]) memory[axi_addr][31:24] <= axi_wdata[31:24];
         end
         
-        // AXI readback uses latched address so it returns the same
-        // memory location targeted by the write
-        axi_rdata_reg <= memory[axi_addr_reg];
+        // AXI readback of current address
+        axi_rdata_reg <= memory[axi_addr];
     end
     
     assign axi_rdata = axi_rdata_reg;

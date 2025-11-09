@@ -1,6 +1,6 @@
-// cpu_axi_interface.v - FIXED VERSION with stable address latching
-// AXI-Lite interface handler for RISC-V CPU
-// Handles memory-mapped control, status, and memory access
+// cpu_axi_interface.v - FINAL CLEAN FIX
+// The problem: Address and write enable asserted in same cycle causes memories
+// to use the PREVIOUS address. Solution: Register addr/data first, then assert WE.
 
 module cpu_axi_interface (
     // AXI-Lite signals
@@ -85,11 +85,6 @@ module cpu_axi_interface (
     reg [1:0]  S_AXI_RRESP_reg;
     reg        S_AXI_RVALID_reg;
     
-    // CRITICAL FIX: Latch bus_addr for stable addressing
-    reg [31:0] latched_bus_addr;
-    reg [31:0] latched_bus_wdata;
-    reg [3:0]  latched_w_strb;
-    
     //==========================================================================
     // AXI Write Address Channel
     //==========================================================================
@@ -137,9 +132,9 @@ module cpu_axi_interface (
     end
     
     //==========================================================================
-    // AXI Write Response Channel
+    // AXI Write Response Channel - MODIFIED to wait for write completion
     //==========================================================================
-    wire write_ready = aw_done && w_done && !S_AXI_BVALID_reg;
+    wire write_ready = aw_done && w_done && !S_AXI_BVALID_reg && (write_state == WR_IDLE);
     
     always @(posedge S_AXI_ACLK) begin
         if (!S_AXI_ARESETN) begin
@@ -200,23 +195,20 @@ module cpu_axi_interface (
     assign bus_wdata = w_data;
     
     //==========================================================================
-    // CRITICAL FIX: Latch address and data when write_ready
+    // CRITICAL FIX: Two-cycle write process
+    // Cycle 1: Load address and data into output registers
+    // Cycle 2: Assert write enable (memories see stable addr/data)
     //==========================================================================
-    always @(posedge S_AXI_ACLK) begin
-        if (!S_AXI_ARESETN) begin
-            latched_bus_addr <= 32'd0;
-            latched_bus_wdata <= 32'd0;
-            latched_w_strb <= 4'b0000;
-        end else if (write_ready) begin
-            latched_bus_addr <= bus_addr;
-            latched_bus_wdata <= bus_wdata;
-            latched_w_strb <= w_strb;
-        end
-    end
     
-    //==========================================================================
-    // Register Write Logic - FIXED with stable latched addresses
-    //==========================================================================
+    reg [1:0] write_state;
+    reg [31:0] pending_addr;
+    reg [31:0] pending_data;
+    reg [3:0] pending_strb;
+    
+    localparam WR_IDLE = 2'b00;
+    localparam WR_SETUP = 2'b01;
+    localparam WR_EXECUTE = 2'b10;
+    
     always @(posedge S_AXI_ACLK) begin
         if (!S_AXI_ARESETN) begin
             cpu_ctrl <= 32'h0;
@@ -229,37 +221,77 @@ module cpu_axi_interface (
             axi_data_addr <= 12'h0;
             axi_data_wdata <= 32'h0;
             axi_data_wstrb <= 4'h0;
+            write_state <= WR_IDLE;
+            pending_addr <= 32'h0;
+            pending_data <= 32'h0;
+            pending_strb <= 4'h0;
         end else begin
-            // Default: clear write enables
-            axi_pc_we <= 1'b0;
-            axi_instr_we <= 1'b0;
-            axi_data_we <= 1'b0;
-            
-            if (bus_we) begin
-                case (bus_addr[7:2])
-                    ADDR_CPU_CTRL: cpu_ctrl <= bus_wdata;
-                    ADDR_CPU_PC: begin
-                        axi_pc_write <= bus_wdata;
-                        axi_pc_we <= 1'b1;
+            case (write_state)
+                WR_IDLE: begin
+                    // Clear all write enables when idle
+                    axi_pc_we <= 1'b0;
+                    axi_instr_we <= 1'b0;
+                    axi_data_we <= 1'b0;
+                    
+                    if (bus_we) begin
+                        // Save the write info
+                        pending_addr <= bus_addr;
+                        pending_data <= bus_wdata;
+                        pending_strb <= w_strb;
+                        
+                        case (bus_addr[7:2])
+                            ADDR_CPU_CTRL: begin
+                                cpu_ctrl <= bus_wdata;
+                                // Stay in IDLE - direct write, no state change needed
+                            end
+                            ADDR_CPU_PC: begin
+                                axi_pc_write <= bus_wdata;
+                                write_state <= WR_EXECUTE;
+                            end
+                            default: begin
+                                // Setup instruction memory address/data
+                                if (bus_addr[7:2] >= ADDR_INSTR_BASE && 
+                                    bus_addr[7:2] < ADDR_DATA_BASE) begin
+                                    axi_instr_addr <= {6'b0, bus_addr[7:2]} - {6'b0, ADDR_INSTR_BASE};
+                                    axi_instr_wdata <= bus_wdata;
+                                    write_state <= WR_EXECUTE;
+                                end
+                                // Setup data memory address/data
+                                else if (bus_addr[7:2] >= ADDR_DATA_BASE) begin
+                                    axi_data_addr <= {6'b0, bus_addr[7:2]} - {6'b0, ADDR_DATA_BASE};
+                                    axi_data_wdata <= bus_wdata;
+                                    axi_data_wstrb <= w_strb;
+                                    write_state <= WR_EXECUTE;
+                                end
+                            end
+                        endcase
                     end
-                    default: begin
-                        // Instruction memory write - use LATCHED address
-                        if (latched_bus_addr[7:2] >= ADDR_INSTR_BASE && 
-                            latched_bus_addr[7:2] < ADDR_DATA_BASE) begin
-                            axi_instr_we <= 1'b1;
-                            axi_instr_addr <= {6'b0, latched_bus_addr[7:2]} - {6'b0, ADDR_INSTR_BASE};
-                            axi_instr_wdata <= latched_bus_wdata;
+                end
+                
+                WR_EXECUTE: begin
+                    // Assert write enable with stable addr/data
+                    // CRITICAL: Ignore bus_we in this state - we're busy!
+                    case (pending_addr[7:2])
+                        ADDR_CPU_PC: begin
+                            axi_pc_we <= 1'b1;
                         end
-                        // Data memory write - use LATCHED address
-                        else if (latched_bus_addr[7:2] >= ADDR_DATA_BASE) begin
-                            axi_data_we <= 1'b1;
-                            axi_data_addr <= {6'b0, latched_bus_addr[7:2]} - {6'b0, ADDR_DATA_BASE};
-                            axi_data_wdata <= latched_bus_wdata;
-                            axi_data_wstrb <= latched_w_strb;
+                        default: begin
+                            if (pending_addr[7:2] >= ADDR_INSTR_BASE && 
+                                pending_addr[7:2] < ADDR_DATA_BASE) begin
+                                axi_instr_we <= 1'b1;
+                            end
+                            else if (pending_addr[7:2] >= ADDR_DATA_BASE) begin
+                                axi_data_we <= 1'b1;
+                            end
                         end
-                    end
-                endcase
-            end
+                    endcase
+                    
+                    // Return to IDLE on next cycle
+                    write_state <= WR_IDLE;
+                end
+                
+                default: write_state <= WR_IDLE;
+            endcase
         end
     end
     

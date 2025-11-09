@@ -1,4 +1,4 @@
-// instruction_memory.v
+// instruction_memory.v - FIXED VERSION
 // Instruction BRAM (16KB = 4096 x 32-bit words)
 // Dual-port: CPU reads, AXI writes
 module instruction_memory (
@@ -24,26 +24,24 @@ module instruction_memory (
     reg [31:0] cpu_rdata_reg;
     assign cpu_rdata = cpu_rdata_reg;
     
-    // Latched AXI address and AXI readback register
-    reg [11:0] axi_addr_reg;
+    // AXI readback register
     reg [31:0] axi_rdata_reg;
     assign axi_rdata = axi_rdata_reg;
     
-    // Latch address and use latched address for write and readback
+    // CRITICAL FIX: No address latching here!
+    // The address is already stable from cpu_axi_interface latching
+    // Just use the address directly when we=1
     always @(posedge clk) begin
-        // latch incoming address each cycle
-        axi_addr_reg <= axi_addr;
-        
-        // Use latched address for write so address and data align to the same cycle
+        // Write to current address when write enable is high
         if (axi_we) begin
-            memory[axi_addr_reg] <= axi_wdata;
+            memory[axi_addr] <= axi_wdata;
         end
         
-        // CPU read port (separate port)
+        // CPU read port (independent)
         cpu_rdata_reg <= memory[cpu_addr];
         
-        // AXI readback returns content at latched address
-        axi_rdata_reg <= memory[axi_addr_reg];
+        // AXI readback of current address
+        axi_rdata_reg <= memory[axi_addr];
     end
 
 endmodule
