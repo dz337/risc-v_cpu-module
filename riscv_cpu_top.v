@@ -1,12 +1,12 @@
-// riscv_cpu_top.v - FIXED VERSION
+// riscv_cpu_top.v - COMPLETE FIXED VERSION
 // Top-level RISC-V CPU module with AXI interface
-// FIX: Added address muxing for read vs write operations
+// FIX: Added bus_rdata mux and address muxing
 
 module riscv_cpu_top (
     input  wire        clk,
     input  wire        rst_n,
     
-    // AXI-Lite interface for ARM to load programs and control CPU
+    // AXI-Lite interface
     input  wire        S_AXI_ACLK,
     input  wire        S_AXI_ARESETN,
     input  wire [31:0] S_AXI_AWADDR,
@@ -27,68 +27,81 @@ module riscv_cpu_top (
     output wire        S_AXI_RVALID,
     input  wire        S_AXI_RREADY,
     
-    // Optional GPIO for testing
     output wire [7:0]  gpio_out
 );
 
-    // Internal bus signals from AXI interface
+    // Internal signals
     wire        bus_we;
     wire [31:0] bus_addr;
     wire [31:0] bus_wdata;
-    wire [31:0] bus_rdata;
+    wire [31:0] bus_rdata;  // Will be driven by bus_rdata_mux
     
-    // Control signals
     wire [31:0] cpu_ctrl;
     wire [31:0] cpu_status;
     wire [31:0] pc_read;
     wire [31:0] axi_pc_write;
     wire        axi_pc_we;
     
-    // Instruction memory AXI interface
     wire        axi_instr_we;
     wire [11:0] axi_instr_addr;
     wire [31:0] axi_instr_wdata;
     wire [31:0] instr_rdata;
     
-    // Data memory AXI interface
     wire        axi_data_we;
     wire [11:0] axi_data_addr;
     wire [31:0] axi_data_wdata;
     wire [3:0]  axi_data_wstrb;
     wire [31:0] data_rdata_axi;
     
-    // NEW: Read address computation wires
     wire [11:0] read_instr_addr;
     wire [11:0] read_data_addr;
     
-    // Register file access
     wire [31:0] reg_rdata;
     
-    // Pipeline to instruction memory
     wire [11:0] instr_addr;
     wire [31:0] instruction;
     
-    // Pipeline to data memory
     wire        data_we;
     wire [11:0] data_addr;
     wire [31:0] data_wdata;
     wire [3:0]  data_wstrb;
     wire [31:0] data_rdata_cpu;
     
-    // Pipeline control/status
     wire        cpu_running;
     wire        cpu_halted;
     wire [2:0]  cpu_state;
     
-    // NEW: Final memory addresses (muxed between read and write)
+    // Muxed memory addresses
     wire [11:0] final_instr_addr;
     wire [11:0] final_data_addr;
     
-    // CRITICAL FIX: Mux between write addresses and read addresses
-    // When writing, use axi_instr_addr (from write state machine)
-    // When reading, use read_instr_addr (computed from read address)
     assign final_instr_addr = axi_instr_we ? axi_instr_addr : read_instr_addr;
     assign final_data_addr = axi_data_we ? axi_data_addr : read_data_addr;
+    
+    //==========================================================================
+    // CRITICAL FIX: bus_rdata mux
+    // This is what was missing! CPU has external memories, so mux is here.
+    //==========================================================================
+    reg [31:0] bus_rdata_mux;
+    
+    always @(*) begin
+        case (bus_addr[7:2])
+            6'h00:   bus_rdata_mux = cpu_ctrl;
+            6'h01:   bus_rdata_mux = cpu_status;
+            6'h02:   bus_rdata_mux = pc_read;
+            6'h03:   bus_rdata_mux = reg_rdata;
+            default: begin
+                if (bus_addr[7:2] >= 6'h10 && bus_addr[7:2] < 6'h20)
+                    bus_rdata_mux = instr_rdata;
+                else if (bus_addr[7:2] >= 6'h20)
+                    bus_rdata_mux = data_rdata_axi;
+                else
+                    bus_rdata_mux = 32'h52495343;
+            end
+        endcase
+    end
+    
+    assign bus_rdata = bus_rdata_mux;
     
     //==========================================================================
     // AXI Interface Module
@@ -114,41 +127,34 @@ module riscv_cpu_top (
         .S_AXI_RVALID(S_AXI_RVALID),
         .S_AXI_RREADY(S_AXI_RREADY),
         
-        // Internal bus
         .bus_we(bus_we),
         .bus_addr(bus_addr),
         .bus_wdata(bus_wdata),
-        .bus_rdata(bus_rdata),
+        .bus_rdata(bus_rdata),  // From our mux above!
         
-        // CPU control/status
         .cpu_ctrl(cpu_ctrl),
         .cpu_status(cpu_status),
         .pc_read(pc_read),
         .axi_pc_write(axi_pc_write),
         .axi_pc_we(axi_pc_we),
         
-        // Instruction memory interface
         .axi_instr_we(axi_instr_we),
         .axi_instr_addr(axi_instr_addr),
         .axi_instr_wdata(axi_instr_wdata),
         .instr_rdata(instr_rdata),
         
-        // Data memory interface
         .axi_data_we(axi_data_we),
         .axi_data_addr(axi_data_addr),
         .axi_data_wdata(axi_data_wdata),
         .axi_data_wstrb(axi_data_wstrb),
         .data_rdata(data_rdata_axi),
         
-        // NEW: Read address outputs (combinational from bus_addr)
         .read_instr_addr(read_instr_addr),
         .read_data_addr(read_data_addr),
         
-        // Register file interface
         .reg_addr(bus_addr[6:2]),
         .reg_rdata(reg_rdata),
         
-        // Status inputs
         .cpu_running(cpu_running),
         .cpu_halted(cpu_halted),
         .cpu_state(cpu_state)
@@ -160,82 +166,59 @@ module riscv_cpu_top (
     riscv_cpu_pipeline pipeline (
         .clk(clk),
         .rst_n(rst_n),
-        
-        // Control
         .cpu_ctrl(cpu_ctrl),
         .axi_pc_write(axi_pc_write),
         .axi_pc_we(axi_pc_we),
-        
-        // Status outputs
         .cpu_running(cpu_running),
         .cpu_halted(cpu_halted),
         .cpu_state(cpu_state),
         .pc(pc_read),
-        
-        // Instruction memory interface
         .instr_addr(instr_addr),
         .instruction(instruction),
-        
-        // Data memory interface
         .data_we(data_we),
         .data_addr(data_addr),
         .data_wdata(data_wdata),
         .data_wstrb(data_wstrb),
         .data_rdata(data_rdata_cpu),
-        
-        // Register file interface
         .reg_rdata(reg_rdata),
-        
-        // GPIO
         .gpio_out(gpio_out)
     );
     
     //==========================================================================
-    // Instruction Memory - Dual Port
-    // FIXED: Now uses final_instr_addr (muxed between read and write)
+    // Instruction Memory
     //==========================================================================
     instruction_memory imem (
         .clk(clk),
-        
-        // CPU interface
         .cpu_addr(instr_addr),
         .cpu_rdata(instruction),
-        
-        // AXI interface - FIXED: uses muxed address
         .axi_we(axi_instr_we),
-        .axi_addr(final_instr_addr),  // <-- MUXED ADDRESS
+        .axi_addr(final_instr_addr),
         .axi_wdata(axi_instr_wdata),
         .axi_rdata(instr_rdata)
     );
     
     //==========================================================================
-    // Data Memory - True Dual Port
-    // FIXED: Now uses final_data_addr (muxed between read and write)
+    // Data Memory
     //==========================================================================
     data_memory_dual_port dmem (
         .clk(clk),
-        
-        // CPU port (Port A)
         .cpu_we(data_we),
         .cpu_addr(data_addr),
         .cpu_wdata(data_wdata),
         .cpu_wstrb(data_wstrb),
         .cpu_rdata(data_rdata_cpu),
-        
-        // AXI port (Port B) - FIXED: uses muxed address
         .axi_we(axi_data_we),
-        .axi_addr(final_data_addr),  // <-- MUXED ADDRESS
+        .axi_addr(final_data_addr),
         .axi_wdata(axi_data_wdata),
         .axi_wstrb(axi_data_wstrb),
         .axi_rdata(data_rdata_axi)
     );
     
-    // Status for AXI
     assign cpu_status = {29'b0, cpu_halted, cpu_running, cpu_state};
 
 endmodule
 
-
+// (Include data_memory_dual_port module as in your document)
 //==============================================================================
 // NEW: True Dual Port Data Memory
 //==============================================================================

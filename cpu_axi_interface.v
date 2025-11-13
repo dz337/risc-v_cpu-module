@@ -1,5 +1,5 @@
-// cpu_axi_interface.v - COMPLETE FIX
-// BUG FIX: Added write_type register to track what kind of write we're doing
+// cpu_axi_interface.v - FIXED ar_addr capture
+// Key fix: ar_addr now properly captured and held throughout read transaction
 
 module cpu_axi_interface (
     input  wire        S_AXI_ACLK,
@@ -44,7 +44,6 @@ module cpu_axi_interface (
     output reg  [3:0]  axi_data_wstrb,
     input  wire [31:0] data_rdata,
     
-    // NEW: Output computed read addresses
     output wire [11:0] read_instr_addr,
     output wire [11:0] read_data_addr,
     
@@ -56,39 +55,40 @@ module cpu_axi_interface (
     input  wire [2:0]  cpu_state
 );
 
+    // Parameters
     localparam ADDR_CPU_CTRL    = 6'h00;
     localparam ADDR_CPU_STATUS  = 6'h01;
     localparam ADDR_CPU_PC      = 6'h02;
     localparam ADDR_CPU_REG     = 6'h03;
     localparam ADDR_INSTR_BASE  = 6'h10;
     localparam ADDR_DATA_BASE   = 6'h20;
-    localparam ADDR_DEBUG_LAST_ADDR = 6'h0C;
-    localparam ADDR_DEBUG_LAST_DATA = 6'h0D;
-    localparam ADDR_DEBUG_WRITE_CNT = 6'h0E;
-    localparam ADDR_DEBUG_STATE     = 6'h0F;
     
-    // State machine states
+    // Write FSM
     localparam WR_IDLE = 2'b00;
     localparam WR_EXECUTE = 2'b10;
     localparam WR_DONE = 2'b11;
     
-    // Write type encoding - CRITICAL NEW ADDITION
+    // Read FSM
+    localparam RD_IDLE = 2'b00;
+    localparam RD_WAIT1 = 2'b01;
+    localparam RD_WAIT2 = 2'b10;
+    localparam RD_DONE = 2'b11;
+    
+    // Write types
     localparam TYPE_NONE  = 3'b000;
     localparam TYPE_CTRL  = 3'b001;
     localparam TYPE_PC    = 3'b010;
     localparam TYPE_INSTR = 3'b011;
     localparam TYPE_DATA  = 3'b100;
     
-    // Write state machine registers
+    // Registers
     reg [1:0] write_state;
     reg write_complete;
-    reg [2:0] write_type;  // NEW: Track what kind of write this is
+    reg [2:0] write_type;
+    reg [1:0] read_state;
     
-    // AXI protocol state
-    reg        aw_done;
-    reg [31:0] aw_addr;
-    reg        w_done;
-    reg [31:0] w_data;
+    reg        aw_done, w_done;
+    reg [31:0] aw_addr, w_data;
     reg [3:0]  w_strb;
     reg [31:0] ar_addr;
     
@@ -101,12 +101,48 @@ module cpu_axi_interface (
     reg [1:0]  S_AXI_RRESP_reg;
     reg        S_AXI_RVALID_reg;
     
-    reg [31:0] debug_last_addr;
-    reg [31:0] debug_last_data;
-    reg [31:0] debug_write_count;
+    reg [11:0] read_instr_addr_reg;
+    reg [11:0] read_data_addr_reg;
     
     //==========================================================================
-    // AXI Write Address Channel
+    // CRITICAL FIX: Read Address Capture
+    // ar_addr must be captured when ARREADY & ARVALID and held until read completes
+    //==========================================================================
+    always @(posedge S_AXI_ACLK) begin
+        if (!S_AXI_ARESETN) begin
+            ar_addr <= 32'd0;
+        end else begin
+            // Capture address when handshake occurs
+            if (S_AXI_ARREADY_reg && S_AXI_ARVALID) begin
+                ar_addr <= S_AXI_ARADDR;
+            end
+            // Hold ar_addr throughout the read transaction
+            // It will only change on the next ARVALID handshake
+        end
+    end
+    
+    //==========================================================================
+    // Read Address Computation (uses captured ar_addr, not ARADDR directly)
+    //==========================================================================
+    always @(posedge S_AXI_ACLK) begin
+        if (!S_AXI_ARESETN) begin
+            read_instr_addr_reg <= 12'h0;
+            read_data_addr_reg <= 12'h0;
+        end else if (S_AXI_ARREADY_reg && S_AXI_ARVALID) begin
+            read_instr_addr_reg <= (S_AXI_ARADDR[7:2] >= ADDR_INSTR_BASE && 
+                                   S_AXI_ARADDR[7:2] < ADDR_DATA_BASE) ? 
+                                  ({6'b0, S_AXI_ARADDR[7:2]} - {6'b0, ADDR_INSTR_BASE}) : 12'h0;
+            
+            read_data_addr_reg <= (S_AXI_ARADDR[7:2] >= ADDR_DATA_BASE) ? 
+                                 ({6'b0, S_AXI_ARADDR[7:2]} - {6'b0, ADDR_DATA_BASE}) : 12'h0;
+        end
+    end
+    
+    assign read_instr_addr = read_instr_addr_reg;
+    assign read_data_addr = read_data_addr_reg;
+    
+    //==========================================================================
+    // Write Address Channel
     //==========================================================================
     always @(posedge S_AXI_ACLK) begin
         if (!S_AXI_ARESETN) begin
@@ -122,14 +158,12 @@ module cpu_axi_interface (
                 S_AXI_AWREADY_reg <= 1'b0;
             end
             
-            if (write_complete) begin
-                aw_done <= 1'b0;
-            end
+            if (write_complete) aw_done <= 1'b0;
         end
     end
     
     //==========================================================================
-    // AXI Write Data Channel
+    // Write Data Channel
     //==========================================================================
     always @(posedge S_AXI_ACLK) begin
         if (!S_AXI_ARESETN) begin
@@ -147,14 +181,12 @@ module cpu_axi_interface (
                 S_AXI_WREADY_reg <= 1'b0;
             end
             
-            if (write_complete) begin
-                w_done <= 1'b0;
-            end
+            if (write_complete) w_done <= 1'b0;
         end
     end
     
     //==========================================================================
-    // Write State Machine - FIXED VERSION
+    // Write State Machine
     //==========================================================================
     always @(posedge S_AXI_ACLK) begin
         if (!S_AXI_ARESETN) begin
@@ -171,9 +203,6 @@ module cpu_axi_interface (
             write_state <= WR_IDLE;
             write_complete <= 1'b0;
             write_type <= TYPE_NONE;
-            debug_last_addr <= 32'h0;
-            debug_last_data <= 32'h0;
-            debug_write_count <= 32'h0;
         end else begin
             axi_pc_we <= 1'b0;
             axi_instr_we <= 1'b0;
@@ -183,12 +212,6 @@ module cpu_axi_interface (
             case (write_state)
                 WR_IDLE: begin
                     if (aw_done && w_done && !S_AXI_BVALID_reg) begin
-                        // DEBUG
-                        debug_last_addr <= aw_addr;
-                        debug_last_data <= w_data;
-                        debug_write_count <= debug_write_count + 1;
-                        
-                        // Decode address and setup registers + write type
                         case (aw_addr[7:2])
                             ADDR_CPU_CTRL: begin
                                 cpu_ctrl <= w_data;
@@ -196,24 +219,20 @@ module cpu_axi_interface (
                                 write_complete <= 1'b1;
                                 write_state <= WR_DONE;
                             end
-                            
                             ADDR_CPU_PC: begin
                                 axi_pc_write <= w_data;
                                 write_type <= TYPE_PC;
                                 write_state <= WR_EXECUTE;
                             end
-                            
                             default: begin
                                 if (aw_addr[7:2] >= ADDR_INSTR_BASE && 
                                     aw_addr[7:2] < ADDR_DATA_BASE) begin
-                                    // Instruction memory write
                                     axi_instr_addr <= {6'b0, aw_addr[7:2]} - {6'b0, ADDR_INSTR_BASE};
                                     axi_instr_wdata <= w_data;
                                     write_type <= TYPE_INSTR;
                                     write_state <= WR_EXECUTE;
                                 end
                                 else if (aw_addr[7:2] >= ADDR_DATA_BASE) begin
-                                    // Data memory write
                                     axi_data_addr <= {6'b0, aw_addr[7:2]} - {6'b0, ADDR_DATA_BASE};
                                     axi_data_wdata <= w_data;
                                     axi_data_wstrb <= w_strb;
@@ -229,40 +248,27 @@ module cpu_axi_interface (
                         endcase
                     end
                 end
-                
                 WR_EXECUTE: begin
-                    // CRITICAL FIX: Use write_type instead of guessing from data
                     case (write_type)
-                        TYPE_PC: begin
-                            axi_pc_we <= 1'b1;
-                        end
-                        TYPE_INSTR: begin
-                            axi_instr_we <= 1'b1;
-                        end
-                        TYPE_DATA: begin
-                            axi_data_we <= 1'b1;
-                        end
-                        default: begin
-                            // Do nothing
-                        end
+                        TYPE_PC: axi_pc_we <= 1'b1;
+                        TYPE_INSTR: axi_instr_we <= 1'b1;
+                        TYPE_DATA: axi_data_we <= 1'b1;
+                        default: ;
                     endcase
-                    
                     write_state <= WR_DONE;
                 end
-                
                 WR_DONE: begin
                     write_complete <= 1'b1;
                     write_type <= TYPE_NONE;
                     write_state <= WR_IDLE;
                 end
-                
                 default: write_state <= WR_IDLE;
             endcase
         end
     end
     
     //==========================================================================
-    // AXI Write Response
+    // Write Response Channel
     //==========================================================================
     always @(posedge S_AXI_ACLK) begin
         if (!S_AXI_ARESETN) begin
@@ -279,24 +285,58 @@ module cpu_axi_interface (
     end
     
     //==========================================================================
-    // AXI Read Address Channel
+    // Read State Machine  
     //==========================================================================
     always @(posedge S_AXI_ACLK) begin
         if (!S_AXI_ARESETN) begin
-            S_AXI_ARREADY_reg <= 1'b0;
-            ar_addr <= 32'd0;
+            read_state <= RD_IDLE;
+            S_AXI_ARREADY_reg <= 1'b1;  // Start ready
         end else begin
-            if (!S_AXI_ARREADY_reg && S_AXI_ARVALID && !S_AXI_RVALID_reg) begin
-                S_AXI_ARREADY_reg <= 1'b1;
-                ar_addr <= S_AXI_ARADDR;
-            end else begin
-                S_AXI_ARREADY_reg <= 1'b0;
-            end
+            case (read_state)
+                RD_IDLE: begin
+                    if (S_AXI_ARVALID && S_AXI_ARREADY_reg) begin
+                        read_state <= RD_WAIT1;
+                        S_AXI_ARREADY_reg <= 1'b0;  // Not ready during processing
+                    end else begin
+                        S_AXI_ARREADY_reg <= 1'b1;  // Stay ready
+                    end
+                end
+                RD_WAIT1: begin
+                    S_AXI_ARREADY_reg <= 1'b0;
+                    read_state <= RD_WAIT2;
+                end
+                RD_WAIT2: begin
+                    S_AXI_ARREADY_reg <= 1'b0;
+                    read_state <= RD_DONE;
+                end
+                RD_DONE: begin
+                    S_AXI_ARREADY_reg <= 1'b0;
+                    if (S_AXI_RVALID_reg && S_AXI_RREADY) begin
+                        read_state <= RD_IDLE;
+                        S_AXI_ARREADY_reg <= 1'b1;  // Ready for next transaction
+                    end
+                end
+            endcase
         end
+    end 
+    
+    //==========================================================================
+    // Internal Read Data Mux (uses captured ar_addr)
+    //==========================================================================
+    reg [31:0] read_data_mux;
+    
+    always @(*) begin
+        case (ar_addr[7:2])
+            ADDR_CPU_CTRL:   read_data_mux = cpu_ctrl;
+            ADDR_CPU_STATUS: read_data_mux = cpu_status;
+            ADDR_CPU_PC:     read_data_mux = pc_read;
+            ADDR_CPU_REG:    read_data_mux = reg_rdata;
+            default:         read_data_mux = bus_rdata;
+        endcase
     end
     
     //==========================================================================
-    // AXI Read Data Channel
+    // Read Data Channel
     //==========================================================================
     always @(posedge S_AXI_ACLK) begin
         if (!S_AXI_ARESETN) begin
@@ -304,10 +344,10 @@ module cpu_axi_interface (
             S_AXI_RRESP_reg <= 2'b00;
             S_AXI_RDATA_reg <= 32'd0;
         end else begin
-            if (S_AXI_ARREADY_reg && S_AXI_ARVALID && !S_AXI_RVALID_reg) begin
+            if (read_state == RD_DONE && !S_AXI_RVALID_reg) begin
                 S_AXI_RVALID_reg <= 1'b1;
                 S_AXI_RRESP_reg <= 2'b00;
-                S_AXI_RDATA_reg <= bus_rdata;
+                S_AXI_RDATA_reg <= read_data_mux;
             end else if (S_AXI_RVALID_reg && S_AXI_RREADY) begin
                 S_AXI_RVALID_reg <= 1'b0;
                 S_AXI_RDATA_reg <= 32'd0;
@@ -315,40 +355,13 @@ module cpu_axi_interface (
         end
     end
     
+    //==========================================================================
+    // Output Assignments
+    //==========================================================================
     assign bus_we = 1'b0;
-    assign bus_addr = ar_addr;
+    assign bus_addr = ar_addr;  // Uses captured address
     assign bus_wdata = 32'h0;
-    
-    //==========================================================================
-    // Register Read Logic
-    //==========================================================================
-    reg [31:0] bus_rdata_reg;
-    
-    always @(*) begin
-        case (bus_addr[7:2])
-            ADDR_CPU_CTRL:   bus_rdata_reg = cpu_ctrl;
-            ADDR_CPU_STATUS: bus_rdata_reg = cpu_status;
-            ADDR_CPU_PC:     bus_rdata_reg = pc_read;
-            ADDR_CPU_REG:    bus_rdata_reg = reg_rdata;
-            ADDR_DEBUG_LAST_ADDR: bus_rdata_reg = debug_last_addr;
-            ADDR_DEBUG_LAST_DATA: bus_rdata_reg = debug_last_data;
-            ADDR_DEBUG_WRITE_CNT: bus_rdata_reg = debug_write_count;
-            ADDR_DEBUG_STATE:     bus_rdata_reg = {27'b0, write_type, write_state};
-            default: begin
-                if (bus_addr[7:2] >= ADDR_INSTR_BASE && 
-                    bus_addr[7:2] < ADDR_DATA_BASE) begin
-                    bus_rdata_reg = instr_rdata;
-                end else if (bus_addr[7:2] >= ADDR_DATA_BASE) begin
-                    bus_rdata_reg = data_rdata;
-                end else begin
-                    bus_rdata_reg = 32'h52495343;  // "RISC" signature
-                end
-            end
-        endcase
-    end
-    
-    assign bus_rdata = bus_rdata_reg;
-    
+        
     assign S_AXI_AWREADY = S_AXI_AWREADY_reg;
     assign S_AXI_WREADY = S_AXI_WREADY_reg;
     assign S_AXI_BRESP = S_AXI_BRESP_reg;
